@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+
+# Engine artifacts — never commit media or run outputs
+runs/
+downloads/
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.avi
+*.ts
+*.m4v
+*.flv
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+
+# Secrets / local config
+.env
+*.token
+*_credentials.json

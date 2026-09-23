@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transcriptor"
+version = "0.1.0"
+description = "Universal media → English transcription and translation engine: verified acquisition, ASR routing, word alignment, context-aware translation, terminology control, QA, professional subtitle export."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Bilal140202" }]
+keywords = ["asr", "whisper", "translation", "subtitles", "google-drive", "transcription"]
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+asr = ["faster-whisper>=1.0.0"]
+align = ["whisperx>=3.1.5"]
+mt = ["ctranslate2>=4.0", "transformers>=4.40", "sentencepiece>=0.1.99"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+transcriptor = "transcriptor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "RUF", "B", "S", "PL"]
+ignore = [
+    # Broad exception catches at provider/CLI boundaries are intentional:
+    # provider availability probing and per-window failure isolation.
+    "BLE001",
+    # subprocess.run results are inspected via returncode/stderr by design.
+    "PLW1510",
+    # Silent capability probing (torch/ctranslate2 detection).
+    "S110",
+    # Lazy imports are the architecture: heavy ML deps must not load eagerly.
+    "PLC0415",
+    # subprocess is used for ffmpeg/ffprobe/yt-dlp integration by design.
+    "S603", "S607",
+    # CJK punctuation in spec examples and source-language strings is intended.
+    "RUF001", "RUF002", "RUF003",
+    # Opinionated counts/magic-number rules; review case by case.
+    "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests rely on asserts and inline fixtures/magic values.
+"tests/**" = ["S101", "S105", "S106", "PLR2004", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

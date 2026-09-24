@@ -5,6 +5,7 @@ USER URL → SOURCE CLASSIFICATION → DOMAIN DETECTION → SOURCE ADAPTER
 """
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -13,13 +14,36 @@ from .gdrive import GoogleDriveAdapter
 from .http import DirectHTTPAdapter
 
 
+class LocalFileAdapter(SourceAdapter):
+    """Pass-through adapter for media already on disk (review re-runs, tests)."""
+
+    name = "file"
+    priority = 0
+
+    def can_handle(self, url: str) -> bool:
+        return url.startswith("/") or url.startswith("file://")
+
+    def resolve(self, url: str, dest_dir: Path, **opts) -> MediaObject:
+        from ..models import AcquisitionRecord
+
+        path = Path(url.removeprefix("file://"))
+        if not path.exists():
+            raise SourceNotSupported(f"Local media not found: {path}")
+        if not path.is_file():
+            raise SourceNotSupported(f"Not a file: {path}")
+        rec = AcquisitionRecord(source_url=str(path), source_type=self.name,
+                                file_name=path.name,
+                                size_bytes=path.stat().st_size, success=True)
+        return MediaObject(path=path, record=rec)
+
+
 class MediaSourceResolver:
     """Registry-driven source resolution. New sources plug in via `register`."""
 
     def __init__(self, adapters: list[SourceAdapter] | None = None) -> None:
         self._adapters: list[SourceAdapter] = []
-        for adapter in (adapters or [GoogleDriveAdapter(), DirectHTTPAdapter(),
-                                     YouTubeAdapter()]):
+        for adapter in (adapters or [LocalFileAdapter(), GoogleDriveAdapter(),
+                                     DirectHTTPAdapter(), YouTubeAdapter()]):
             self.register(adapter)
 
     def register(self, adapter: SourceAdapter) -> None:
@@ -60,7 +84,6 @@ class YouTubeAdapter(SourceAdapter):
         return host.endswith(("youtube.com", "youtu.be", "youtube-nocookie.com"))
 
     def resolve(self, url: str, dest_dir: Path, **opts) -> MediaObject:
-        import shutil
         import subprocess
 
         if not shutil.which("yt-dlp"):

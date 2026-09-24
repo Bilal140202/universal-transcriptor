@@ -127,7 +127,11 @@ def segment_for_subtitles(
     cues: list[SubtitleCue] = []
 
     for seg in sorted(doc.segments, key=lambda s: s.start):
-        chunks = _split_text_at_boundaries(seg.text, rules.max_chars_per_line * rules.max_lines)
+        # English subtitles are the product (spec §1): use the translated text
+        # when present; fall back to the source text for English-language
+        # input or untranslated runs. Timing always comes from the segment.
+        text = (seg.metadata or {}).get("english") or seg.text
+        chunks = _split_text_at_boundaries(text, rules.max_chars_per_line * rules.max_lines)
         n = len(chunks)
         for j, chunk in enumerate(chunks):
             # Distribute time across chunks proportionally to length (word-accurate

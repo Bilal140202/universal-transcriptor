@@ -83,3 +83,26 @@ def extract_for_asr(
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise AudioExtractionError("Audio extraction produced an empty file.")
     return out_path
+
+
+def trim_prefix(asr_audio: str | Path, out_path: str | Path,
+                seconds: float) -> Path:
+    """Cut a **prefix** of the derived ASR audio for smoke tests / previews.
+
+    Timeline safety (spec §6): a prefix cut starts at t=0, so every timestamp
+    in the excerpt maps 1:1 onto the authoritative media timeline — no offset
+    bookkeeping, no drift. Cutting a middle slice would shift the timeline and
+    is therefore NOT provided here.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise AudioExtractionError("ffmpeg not found on PATH.")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(asr_audio),
+           "-t", f"{float(seconds):.3f}", "-c", "copy", str(out_path)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+        raise AudioExtractionError(
+            f"Excerpt trim failed: {proc.stderr.strip()[-300:]}")
+    return out_path

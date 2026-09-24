@@ -15,7 +15,7 @@ from .acquisition import MediaSourceResolver
 from .asr.base import TranscribeHints
 from .asr.providers import FasterWhisperProvider, WhisperCppProvider, WhisperXProvider
 from .asr.router import ASRRouter
-from .audio import extract_for_asr, select_audio_stream
+from .audio import extract_for_asr, select_audio_stream, trim_prefix
 from .models import Finding, StageRecord, TranscriptDocument
 from .probe import probe_media
 from .qa import english_quality_scan, hallucination_scan, normalize_english, temporal_scan
@@ -39,7 +39,7 @@ class PipelineOrchestrator:
 
     def run(self, source: str, *, out_dir: str | Path | None = None,
             language: str | None = None, accuracy: str = "balanced",
-            loudness_normalize: bool = False,
+            loudness_normalize: bool = False, excerpt_seconds: float | None = None,
             subtitle_mux: bool = False, exports: tuple[str, ...] = ("srt", "vtt", "json"),
             extra_terms: dict[str, str] | None = None) -> dict[str, Any]:
         stages: list[StageRecord] = []
@@ -49,6 +49,7 @@ class PipelineOrchestrator:
             def _ctx():
                 rec = StageRecord(name=name, status="running")
                 stages.append(rec)
+                _dump()
                 t0 = time.monotonic()
 
                 class _C:
@@ -61,6 +62,7 @@ class PipelineOrchestrator:
                         else:
                             rec.status = "failed"
                             rec.error = f"{exc_type.__name__}: {exc}"
+                        _dump()
                         return False  # propagate
                 return _C()
             return _ctx
@@ -68,7 +70,17 @@ class PipelineOrchestrator:
         run_dir = Path(out_dir) if out_dir else self.work_dir / time.strftime("run-%Y%m%d-%H%M%S")
         run_dir.mkdir(parents=True, exist_ok=True)
         report: dict[str, Any] = {"source": source, "run_dir": str(run_dir), "stages": stages,
-                                  "findings": findings, "artifacts": {}}
+                                  "findings": findings, "artifacts": {},
+                                  "status": "running"}
+        report_path = run_dir / "report.json"
+
+        def _dump() -> None:
+            """Persist the live report after every stage — the review UI polls
+            this file for stage-by-stage progress (no hidden server state)."""
+            report_path.write_text(json.dumps(
+                {**report, "stages": [asdict(s) for s in stages],
+                 "findings": [asdict(f) for f in findings]},
+                ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
         # 1 — acquisition ----------------------------------------------------
         with stage("acquisition")() as rec:
@@ -96,6 +108,14 @@ class PipelineOrchestrator:
             rec.artifacts = {"stream_index": stream.index,
                              "derived_audio": str(asr_audio),
                              "timing_note": "ASR audio is derived; media timestamps remain authoritative."}
+            if excerpt_seconds:
+                asr_audio = trim_prefix(asr_audio, run_dir / "asr_excerpt.wav",
+                                        excerpt_seconds)
+                rec.artifacts["excerpt"] = {
+                    "seconds": excerpt_seconds,
+                    "note": "Prefix excerpt (t=0 cut): timestamps remain 1:1 with media.",
+                    "path": str(asr_audio),
+                }
 
         # 4 — ASR ----------------------------------------------------------------
         with stage("asr")() as rec:
@@ -107,6 +127,9 @@ class PipelineOrchestrator:
             rec.artifacts = {"provider": provider.name,
                              "decision": asdict(decision),
                              "segments": len(doc.segments)}
+            # Memory hygiene: release the ASR model before the MT model loads
+            # so peak RAM stays near max(model) instead of sum(models).
+            provider.unload()
 
         # 5 — QA pass 1: hallucination + temporal on source transcript ----------
         with stage("qa_transcript")() as rec:
@@ -172,11 +195,7 @@ class PipelineOrchestrator:
                 rec.artifacts = {"muxed": str(muxed)}
 
         report["status"] = "ok" if all(s.status in ("ok", "skipped") for s in stages) else "partial"
-        report_path = run_dir / "report.json"
-        report_path.write_text(json.dumps(
-            {**report, "stages": [asdict(s) for s in stages],
-             "findings": [asdict(f) for f in findings]},
-            ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        _dump()
         report["report_path"] = str(report_path)
         return report
 

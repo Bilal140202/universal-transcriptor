@@ -1,5 +1,6 @@
 """Subtitle subpackage — professional segmentation and export."""
-from .export import burn_in_subtitles, mux_subtitle_track, to_ass, to_json, to_srt, to_vtt
+from .export import (burn_in_subtitles, mux_subtitle_track, rebuild_from_json,
+                     to_ass, to_json, to_srt, to_vtt)
 from .segmentation import SubtitleCue, SubtitleRules, segment_for_subtitles
 
 __all__ = [
@@ -7,6 +8,7 @@ __all__ = [
            "SubtitleRules",
            "burn_in_subtitles",
            "mux_subtitle_track",
+           "rebuild_from_json",
            "segment_for_subtitles",
            "to_ass",
            "to_json",

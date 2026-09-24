@@ -104,4 +104,21 @@ class ASRRouter:
                 "environment. Install the matching extra, e.g. "
                 "`pip install -e \".[asr]\"` for faster-whisper."
             )
+        self._configure(provider, decision)
         return provider, decision
+
+    @staticmethod
+    def _configure(provider: ASRProvider, decision: RouteDecision) -> None:
+        """Push the routing decision onto the provider instance.
+
+        Providers are registered singletons with default model configs; the
+        router's decision (model size, compute type, device) is authoritative.
+        Without this, a decision of 'base/int8' would silently transcribe with
+        the provider's default 'large-v3'.
+        """
+        if hasattr(provider, "model_size"):
+            provider.model_size = decision.model
+        if hasattr(provider, "compute_type"):
+            provider.compute_type = decision.compute_type
+        if hasattr(provider, "batch_size"):
+            provider.batch_size = decision.batch_size

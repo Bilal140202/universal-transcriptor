@@ -59,6 +59,12 @@ class FasterWhisperProvider(ASRProvider):
             )
         return self._model
 
+    def unload(self) -> None:
+        if self._model is not None:
+            self._model = None
+            import gc
+            gc.collect()
+
     def transcribe(self, audio_path: str | Path, hints: TranscribeHints) -> TranscriptDocument:
         model = self._ensure_model()
         segments_iter, info = model.transcribe(
@@ -129,6 +135,10 @@ class WhisperXProvider(ASRProvider):
             return True
         except ImportError:
             return False
+
+    def unload(self) -> None:
+        import gc
+        gc.collect()
 
     def transcribe(self, audio_path: str | Path, hints: TranscribeHints) -> TranscriptDocument:
         import whisperx

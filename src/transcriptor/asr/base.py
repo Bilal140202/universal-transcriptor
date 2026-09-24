@@ -53,5 +53,13 @@ class ASRProvider(ABC):
         hallucination scan: no_speech_prob, compression_ratio, avg_logprob.
         """
 
+    def unload(self) -> None:
+        """Release any loaded model resources (memory hygiene).
+
+        The pipeline calls this after the ASR stage so a heavy translation
+        model can load in the same process without doubling peak RAM.
+        Default: no-op for stateless providers.
+        """
+
     def __repr__(self) -> str:  # pragma: no cover
         return f"<{type(self).__name__} {self.name}>"

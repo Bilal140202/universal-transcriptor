@@ -83,6 +83,55 @@ def to_json(doc: TranscriptDocument, cues: list[SubtitleCue] | None = None) -> s
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def rebuild_from_json(
+    transcript_payload: dict,
+    edits: dict[str, str] | None = None,
+    rules: "SubtitleRules | None" = None,
+) -> tuple[dict, list[SubtitleCue]]:
+    """Apply human review edits to a transcript payload and rebuild cue lines.
+
+    Contract (spec §17 human review):
+    - ONLY the English text of segments may change; timing is authoritative
+      and is never rewritten here.
+    - ``edits`` maps segment_id → corrected English text.
+    - Cue lines are re-wrapped under the professional layout rules; cue
+      timings stay bound to the original temporal spans.
+    """
+    from .segmentation import SubtitleRules, _balanced_lines
+
+    rules = rules or SubtitleRules()
+    edits = edits or {}
+    segments = transcript_payload.get("segments", [])
+    by_id = {s.get("segment_id"): s for s in segments}
+    applied = 0
+    for seg_id, english in edits.items():
+        seg = by_id.get(seg_id)
+        if seg is None:
+            continue
+        seg.setdefault("metadata", {})["english"] = english
+        seg["metadata"]["edited"] = True
+        applied += 1
+
+    cues: list[SubtitleCue] = []
+    for c in transcript_payload.get("cues", []):
+        texts: list[str] = []
+        for sid in c.get("segment_ids", []):
+            seg = by_id.get(sid, {})
+            meta = seg.get("metadata") or {}
+            texts.append(meta.get("english") or seg.get("text", ""))
+        lines: list[str] = []
+        for t in texts:
+            lines.extend(_balanced_lines(
+                t, rules.max_chars_per_line, rules.max_lines) if t else [])
+        cues.append(SubtitleCue(
+            index=c.get("index", 0), start=c.get("start", 0.0),
+            end=c.get("end", 0.0), lines=lines or [""],
+            speaker=c.get("speaker"), segment_ids=c.get("segment_ids", []),
+        ))
+    transcript_payload["edits_applied"] = applied
+    return transcript_payload, cues
+
+
 # ---------------------------------------------------------------------------
 # Video paths
 # ---------------------------------------------------------------------------

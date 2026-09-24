@@ -165,6 +165,14 @@ def english_quality_scan(cues: list, rules) -> list[Finding]:
                     message=(f"Cue {cue.index} line exceeds {rules.max_chars_per_line} "
                              f"chars ({len(line)})."),
                     suggestion="Rebalance lines."))
+        if len(cue.lines) > rules.max_lines:
+            findings.append(Finding(
+                code="QUALITY_LINE_COUNT", severity=SEVERITY_WARN,
+                cue_index=cue.index,
+                message=(f"Cue {cue.index} has {len(cue.lines)} lines "
+                         f"(max {rules.max_lines})."),
+                suggestion="Shorten the translation or split the cue earlier.",
+            ))
         if "  " in text:
             findings.append(Finding("QUALITY_DOUBLE_SPACE", SEVERITY_INFO,
                 cue_index=cue.index, message=f"Cue {cue.index} contains double spaces."))

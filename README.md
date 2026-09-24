@@ -81,8 +81,14 @@ transcriptor probe "https://drive.google.com/file/d/FILE_ID/view"
 # Full pipeline: acquire → transcribe → translate → export
 transcriptor run "https://drive.google.com/file/d/FILE_ID/view" --out ./runs
 
+# Long media: transcribe only the first N seconds (prefix cut, timestamps 1:1)
+transcriptor run "https://drive.google.com/file/d/FILE_ID/view" --excerpt 240
+
 # List which ASR/MT backends are available in this environment
 transcriptor providers
+
+# Review UI (submit · watch · review · edit · export)
+cd web && npm install && npm run dev
 ```
 
 Heavy backends are optional extras:
@@ -152,8 +158,10 @@ adapter boundary — see the spec.
 | Hallucination / temporal / English QA | implemented |
 | Professional subtitle segmentation + SRT/VTT/ASS/JSON | implemented |
 | Subtitle-track mux (stream copy, no re-encode) | implemented |
-| Frontend (review UI) | planned — `web/` |
-| Burn-in render path | planned (explicit request only) |
+| Frontend (review UI) | **implemented** — `web/` (submit · watch · review · edit · export) |
+| Burn-in render path | implemented, explicit request only (`transcriptor.burn_in_subtitles`) |
+| Range-chunked acquisition (Drive quota gate) | implemented — paced sequential + parallel variants |
+| Human review edits → reexport | implemented (`transcriptor reexport`) |
 
 ## License
 

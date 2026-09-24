@@ -2,9 +2,17 @@
 from __future__ import annotations
 
 import json
+import os
+import os
+from pathlib import Path
 
 from ..models import Finding
 from .base import TranslationProvider, TranslationResult
+
+# Default location of a CTranslate2-converted NLLB (int8). CT2 needs ~650 MB
+# resident instead of ~2.5 GB fp32 torch — the difference between a working
+# low-memory host and an OOM kill. See docs/RESEARCH.md §5.
+_DEFAULT_CT2_DIR = "/home/z/models/nllb-600m-ct2-int8"
 
 # NLLB language code mapping for common Whisper codes.
 _NLLB_CODES = {
@@ -26,8 +34,12 @@ class NLLBTranslationProvider(TranslationProvider):
     name = "nllb"
     modes = ("LOCAL_NLLB",)
 
-    def __init__(self, model_id: str = "facebook/nllb-200-distilled-600M") -> None:
+    def __init__(self, model_id: str = "facebook/nllb-200-distilled-600M",
+                 ct2_dir: str | None = None) -> None:
         self.model_id = model_id
+        env_dir = os.environ.get("TRANSCRIPTOR_NLLB_CT2_DIR")
+        self.ct2_dir = ct2_dir or env_dir or (
+            _DEFAULT_CT2_DIR if Path(_DEFAULT_CT2_DIR).is_dir() else None)
         self._pipe = None
 
     def available(self) -> bool:
@@ -39,14 +51,96 @@ class NLLBTranslationProvider(TranslationProvider):
 
     def _ensure(self):
         if self._pipe is None:
-            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-            tok = AutoTokenizer.from_pretrained(self.model_id)
-            model = AutoModelForSeq2SeqLM.from_pretrained(self.model_id)
-            self._pipe = (tok, model)
+            if self.ct2_dir and Path(self.ct2_dir).is_dir():
+                self._pipe = self._ensure_ct2()
+            else:
+                self._pipe = self._ensure_torch()
         return self._pipe
 
+    def _ensure_ct2(self):
+        import ctranslate2
+        import sentencepiece as spm
+        translator = ctranslate2.Translator(self.ct2_dir, compute_type="int8")
+        sp = spm.SentencePieceProcessor(
+            model_file=str(Path(self.ct2_dir) / "sentencepiece.bpe.model"))
+        return ("ct2", translator, sp)
+
+    def _ensure_torch(self):
+        import torch
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(self.model_id)
+        dtype_name = os.environ.get("TRANSCRIPTOR_MT_DTYPE", "auto").lower()
+        requested = {"float32": torch.float32, "bfloat16": torch.bfloat16,
+                     "float16": torch.float16}.get(dtype_name)
+        # low_cpu_mem_usage: stream weights into the target dtype instead of
+        # materializing a full fp32 copy first — halves load-time peak RAM.
+        common = dict(low_cpu_mem_usage=True)
+        if requested is None:  # auto: fp32 preferred, fall back on pressure
+            try:
+                model = AutoModelForSeq2SeqLM.from_pretrained(self.model_id, **common)
+            except (MemoryError, RuntimeError) as exc:
+                print(f"[nllb] fp32 load failed ({exc}); retrying bfloat16",
+                      flush=True)
+                model = AutoModelForSeq2SeqLM.from_pretrained(
+                    self.model_id, dtype=torch.bfloat16, **common)
+        else:
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                self.model_id, dtype=requested, **common)
+        model.eval()
+        return ("torch", tok, model)
+
+    def unload(self) -> None:
+        if self._pipe is not None:
+            self._pipe = None
+            import gc
+            gc.collect()
+
     def translate_batch(self, windows, source_language: str) -> list[TranslationResult]:
-        tok, model = self._ensure()
+        pipe = self._ensure()
+        if pipe[0] == "ct2":
+            return self._translate_ct2(pipe, windows, source_language)
+        return self._translate_torch(pipe, windows, source_language)
+
+    def _translate_ct2(self, pipe, windows, source_language: str) -> list[TranslationResult]:
+        """CTranslate2 int8 batch translation — ~650 MB resident, CPU-fast."""
+        import re
+        _, translator, sp = pipe
+        lang_tag = re.compile(r"^[a-z]{3}_[A-Z][a-zA-Z]{3,4}$")
+        src = _NLLB_CODES.get(source_language or "", "eng_Latn")
+        if not windows:
+            return []
+        batch = [(w, [src] + sp.encode(w.segment.text, out_type=str))
+                 for w in windows]
+        try:
+            outputs = translator.translate_batch(
+                [tokens for _, tokens in batch],
+                target_prefix=[["eng_Latn"]] * len(batch),
+                max_batch_size=16,
+            )
+        except Exception as exc:
+            return [TranslationResult(
+                w.segment_id, provider=self.name, ok=False,
+                findings=[Finding(code="MT_FAILED", severity="error",
+                                  message=f"NLLB(CT2) failed: {exc}")],
+            ) for w, _ in batch]
+        results: list[TranslationResult] = []
+        for (w, _), out in zip(batch, outputs):
+            try:
+                best = out.hypotheses[0] if out.hypotheses else []
+                toks = [t for t in best if not lang_tag.match(t)]
+                english = sp.decode(toks).strip()
+                results.append(TranslationResult(w.segment_id, english, self.name))
+            except Exception as exc:
+                results.append(TranslationResult(
+                    w.segment_id, provider=self.name, ok=False,
+                    findings=[Finding(code="MT_FAILED", severity="error",
+                                      message=f"NLLB(CT2) decode failed on "
+                                      f"{w.segment_id}: {exc}")],
+                ))
+        return results
+
+    def _translate_torch(self, pipe, windows, source_language: str) -> list[TranslationResult]:
+        tok, model = pipe[1], pipe[2]
         src = _NLLB_CODES.get(source_language or "", "eng_Latn")
         results: list[TranslationResult] = []
         for w in windows:
@@ -94,11 +188,17 @@ class LLMTranslationProvider(TranslationProvider):
     name = "llm"
     modes = ("LOCAL_LLM", "CLOUD_PROVIDER")
 
-    def __init__(self, model: str = "qwen2.5-7b-instruct",
+    def __init__(self, model: str | None = None,
                  base_url: str | None = None, api_key: str | None = None) -> None:
-        self.model = model
-        self.base_url = base_url          # None → standard OpenAI endpoint
-        self.api_key = api_key
+        # Environment overrides let deployments (web bridge, containers) wire
+        # any OpenAI-compatible endpoint — local llama.cpp/Ollama/vLLM or the
+        # sandbox SDK proxy — without code changes.
+        self.model = (model or os.environ.get("TRANSCRIPTOR_LLM_MODEL")
+                      or "qwen2.5-7b-instruct")
+        self.base_url = (base_url if base_url is not None
+                         else os.environ.get("TRANSCRIPTOR_LLM_BASE_URL"))
+        self.api_key = (api_key if api_key is not None
+                        else os.environ.get("TRANSCRIPTOR_LLM_API_KEY", "local"))
 
     def available(self) -> bool:
         try:
@@ -134,7 +234,6 @@ class LLMTranslationProvider(TranslationProvider):
             try:
                 resp = client.chat.completions.create(
                     model=self.model,
-                    response_format={"type": "json_object"},
                     messages=[
                         {"role": "system",
                          "content": SYSTEM_PROMPT.format(source=source_language or "the source")},
@@ -142,7 +241,7 @@ class LLMTranslationProvider(TranslationProvider):
                     ],
                     temperature=0.2,
                 )
-                data = json.loads(resp.choices[0].message.content)
+                data = _parse_llm_json(resp.choices[0].message.content)
                 got = {t["segment_id"]: t.get("english", "") for t in data.get("translations", [])}
                 for w in batch:
                     if w.segment_id in got:
@@ -166,6 +265,25 @@ class LLMTranslationProvider(TranslationProvider):
                                           segment_id=w.segment_id)],
                     ))
         return results
+
+
+def _parse_llm_json(content: str) -> dict:
+    """Parse the translator's STRICT-JSON reply defensively.
+
+    Tolerates ```json fences and stray prose around the object — the model is
+    instructed to reply with JSON only, but enforcing structure beats failing
+    a whole batch over a markdown fence.
+    """
+    text = (content or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        text = text[start:end + 1]
+    return json.loads(text)
 
 
 class AutoTranslationProvider(TranslationProvider):

@@ -129,3 +129,46 @@ Defaults in `subtitles/segmentation.py`, all configurable:
 - `avg_logprob` → confidence; extreme `compression_ratio` → flag
 - negative/zero durations, overlap, cues beyond media duration → temporal flags
 - low-confidence segments surfaced for human review, never auto-deleted
+
+## 7. Google Drive quota gate — live validation (2026-09, sandbox)
+
+Sustained testing against a 2.16 GB popular file
+(`BABYMONSTER CHOOM TOUR KYOCERA DAY2.mp4`, share-link public) surfaced
+mechanics that materially shaped the acquisition layer:
+
+| Observation | Evidence | Design consequence |
+|---|---|---|
+| Full GETs of quota-gated files return `200 text/html` ("Too many users have viewed or downloaded this file recently", ~2 KB) | reproduced repeatedly | never trust content-type-less downloads; the HTML page must be detected before writing media |
+| The confirmation form (`id/export/confirm/uuid`) replays correctly | interstitial parse + replay verified | generic form replay (no hard-coded parameter names) |
+| Ranged requests (`Range: bytes=a-b`) are honored (206 + Content-Range) *even when full GETs are gated* | `bytes=0-1023` → 206 video/mp4 while full GET → HTML | chunked Range acquisition is the reliable path |
+| Gating is probabilistic per request under light load | 64KB→206, 4MB→HTML, 8MB→206, 32MB→HTML in one sequence | transient failures need retry with backoff, not abort |
+| After ~224 MB of sustained single-stream pull, gating becomes persistent for minutes | single connection: 14 chunks OK, then 8+ consecutive HTML | paced chunking beats sustained streaming (token-bucket-like limiter) |
+| **Concurrent ranged requests trip the gate immediately** | 3–5 parallel workers: first chunks land, then all workers throttled while single sequential requests still succeed | paced sequential is the default (`TRANSCRIPTOR_ACQ_STRATEGY=paced`); parallel stays available for friendlier sources |
+| Confirm parameters remain valid across multiple ranged requests | 3 consecutive 206s on one uuid | no per-chunk re-confirmation needed |
+| Auth vs quota pages are distinguishable | quota: "too many users…"; auth: "you need access…" | auth fails fast with actionable message; quota retries |
+
+Resulting architecture:
+
+1. `ranged_download` — sequential 16 MB chunks, 2 s pacing between chunks,
+   per-chunk retry (12 × exp backoff ≤ 30 s), `.part` resume, Content-Range
+   completeness verification.
+2. `ParallelRangedDownloader` — per-worker segments, own sessions, per-chunk
+   Content-Range start validation, confirm-parameter refresher, throttled-page
+   classification (must precede Range-violation detection: Drive's quota page
+   is a plain `200 text/html` with no Content-Range), segment concatenation.
+3. Outer persistence belongs to the caller: each failed attempt resumes from
+   the `.part`, so looping `resolve()` across gate windows makes progress.
+
+## 8. NLLB CTranslate2 deployments — memory notes
+
+- `facebook/nllb-200-distilled-600M` fp32 via torch transformers peaks at
+  ~2.5 GB resident even with `low_cpu_mem_usage=True` (transformers 5.x) —
+  OOM-killed on a 3–4 GB host running a Next.js server alongside.
+- Pre-converted community CT2 int8 checkpoints (tested: JustFrederik) produced
+  degenerate repetitive output even at beam 1 / greedy — conversion defect, not
+  usage; fp32 CT2 weights could not be locally converted (the converter itself
+  OOMs) or loaded (needs the full fp32 resident).
+- Recommended low-memory path: LLM translation via an OpenAI-compatible
+  endpoint (better subtitle quality anyway — honors context windows and the
+  glossary natively), with NLLB CT2 as the offline fallback on hosts that can
+  afford ~650 MB–1.3 GB resident (and a verified-good conversion).

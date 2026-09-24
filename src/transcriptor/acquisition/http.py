@@ -101,6 +101,7 @@ class DirectHTTPAdapter(SourceAdapter):
         dest_dir.mkdir(parents=True, exist_ok=True)
         session = _RetrySession()
         headers = dict(session_kwargs.pop("headers", {}))
+        max_retries = int(os.environ.get("TRANSCRIPTOR_RANGED_MAX_RETRIES", "12"))
         if pacing_seconds is None:
             pacing_seconds = float(os.environ.get("TRANSCRIPTOR_CHUNK_PACING_S", "2"))
 
@@ -228,7 +229,7 @@ class DirectHTTPAdapter(SourceAdapter):
                 attempts += 1
                 if partial is not None and partial.exists():
                     offset = partial.stat().st_size  # resume from what landed
-                if attempts > 12:
+                if attempts > max_retries:
                     raise VerificationFailed(
                         f"Ranged download stalled at byte {offset}"
                         f"/{total if total is not None else '?'} after "
